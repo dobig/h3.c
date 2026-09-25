@@ -8,6 +8,7 @@
 #include "h3_safetensors.h"
 #include "h3_text_encoder.h"
 #include "h3_tokenizer.h"
+#include "h3_trace.h"
 #include "h3_video_encoder.h"
 #include "h3_video_vae.h"
 #include "h3_vision_encoder.h"
@@ -1445,6 +1446,22 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
         goto cleanup;
     }
     if (progress.cancelled) goto cleanup;
+    if (h3_trace_enabled()) {
+        uint64_t text_shape[] = {text.tokens, text.width};
+        (void)h3_trace_bf16("text.embedding", text.values, 2, text_shape);
+        if (text.tags)
+            (void)h3_trace_u8("text.tags", text.tags, 1, text_shape);
+        if (condition_video_elements) {
+            uint64_t shape[] = {condition_video_elements};
+            (void)h3_trace_f32("condition.video_rows", condition_video_rows,
+                               1, shape);
+        }
+        if (condition_audio_elements) {
+            uint64_t shape[] = {condition_audio_elements};
+            (void)h3_trace_f32("condition.audio_rows", condition_audio_rows,
+                               1, shape);
+        }
+    }
 
     h3_layout_spec spec = {(int)text.tokens, temporal.video_t, latent_h,
                            latent_w, temporal.audio_t, temporal.frame_count,
@@ -1573,6 +1590,12 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     h3_rng_seed(&audio_rng, params->seed);
     h3_rng_fill_normal(&video_rng, video, video_count);
     h3_rng_fill_normal(&audio_rng, audio, audio_count);
+    if (h3_trace_enabled()) {
+        uint64_t video_shape[] = {video_count};
+        uint64_t audio_shape[] = {audio_count};
+        (void)h3_trace_f32("noise.video", video, 1, video_shape);
+        (void)h3_trace_f32("noise.audio", audio, 1, audio_shape);
+    }
     if (!h3_dit_denoise_euler_preview(
             dit, video, audio, params->denoise_reuse,
             h3_dit_progress_bridge, &progress,
@@ -1590,6 +1613,12 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     }
     if (!dit_is_cached) h3_dit_free(dit);
     dit = NULL;
+    if (h3_trace_enabled()) {
+        uint64_t video_shape[] = {video_count};
+        uint64_t audio_shape[] = {audio_count};
+        (void)h3_trace_f32("latent.video", video, 1, video_shape);
+        (void)h3_trace_f32("latent.audio", audio, 1, audio_shape);
+    }
     if (progress.cancelled) goto cleanup;
     h3_progress_emit(&progress, "audio VAE", 0, 7);
     if (!h3_audio_vae_decode(audio_vae_path, "h3_shaders.metal", audio,
@@ -1600,6 +1629,11 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     }
     free(audio);
     audio = NULL;
+    if (h3_trace_enabled()) {
+        uint64_t shape[] = {(uint64_t)waveform.channels,
+                            (uint64_t)waveform.samples};
+        (void)h3_trace_f32("audio.waveform", waveform.pcm, 2, shape);
+    }
     if (progress.cancelled) goto cleanup;
     if (!preview_decoder && ctx->cache_enabled) {
         h3_progress_emit(&progress, "video VAE load", 0, 36);
@@ -1636,6 +1670,12 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
     if (!rgb8) {
         h3_set_error(ctx, "out of memory converting generated RGB frames");
         goto cleanup;
+    }
+    if (h3_trace_enabled()) {
+        uint64_t shape[] = {(uint64_t)frames.frames, (uint64_t)frames.height,
+                            (uint64_t)frames.width, 3};
+        (void)h3_trace_f32("video.rgb", frames.rgb, 4, shape);
+        (void)h3_trace_u8("video.rgb8", rgb8, 4, shape);
     }
     int output_width = frames.width;
     int output_height = frames.height;

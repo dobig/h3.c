@@ -1,6 +1,7 @@
 #include "h3_dit.h"
 
 #include "h3_dit_schedule.h"
+#include "h3_trace.h"
 #include "h3_weights.h"
 
 #include <math.h>
@@ -254,6 +255,31 @@ static int gpu_op(h3_dit *dit, int ok, char *error, size_t error_size,
     if (ok) return 1;
     fail(error, error_size, "%s: %s", operation, h3_gpu_error(dit->gpu));
     return 0;
+}
+
+/* Parity tracing inside an open command chain: finish the queued work, read
+ * the tensor, and reopen the chain. Command boundaries do not change results
+ * (a per-block split was verified byte-identical), so this only costs time. */
+static int trace_synced(h3_dit *dit, const char *name,
+                        const h3_gpu_tensor *tensor, size_t offset,
+                        uint64_t rows, uint64_t width,
+                        char *error, size_t error_size) {
+    if (!h3_trace_wants(name)) return 1;
+    if (!gpu_op(dit, h3_gpu_submit(dit->gpu), error, error_size,
+                "submit for trace")) return 0;
+    uint64_t shape[] = {rows, width};
+    size_t elements = (size_t)(rows * width);
+    if (h3_gpu_tensor_dtype(tensor) == H3_GPU_F32) {
+        float *values = malloc(elements * sizeof(*values) + 1);
+        if (values && h3_gpu_tensor_read_f32_range(tensor, offset, values,
+                                                    elements))
+            (void)h3_trace_f32(name, values, 2, shape);
+        free(values);
+    } else if (!offset) {
+        (void)h3_trace_gpu(name, tensor, rows, width);
+    }
+    return gpu_op(dit, h3_gpu_begin(dit->gpu), error, error_size,
+                  "resume after trace");
 }
 
 static void report(h3_dit_progress progress, void *opaque, const char *phase,
@@ -2334,6 +2360,15 @@ static int encode_forward(h3_dit *dit, int step, int begin, int submit,
                 OP(h3_gpu_begin(dit->gpu),
                    "continue after streamed DiT block");
             }
+            if (h3_trace_enabled()) {
+                char name[64];
+                snprintf(name, sizeof(name), "dit.step%02d.block%02u.hidden",
+                         step, block);
+                uint32_t rows = dit->token_reduction_active
+                    ? dit->reduced_sequence : dit->sequence;
+                if (!trace_synced(dit, name, dit->hidden, 0, rows, HIDDEN,
+                                  error, error_size)) return 0;
+            }
         }
         if (use_token_reduction &&
             token_reduction_end == H3_DIT_BLOCKS &&
@@ -2424,6 +2459,17 @@ static int encode_forward(h3_dit *dit, int step, int begin, int submit,
         OP(h3_gpu_cast_f32_to_bf16(dit->gpu, dit->video_output_bf16,
             dit->video_output, dit->video_rows * VIDEO_PATCH),
            "final video output cast");
+    }
+    if (h3_trace_enabled()) {
+        char name[64];
+        snprintf(name, sizeof(name), "dit.step%02d.velocity.video", step);
+        if (!trace_synced(dit, name, dit->video_output_bf16, 0,
+                          dit->video_rows, VIDEO_PATCH,
+                          error, error_size)) return 0;
+        snprintf(name, sizeof(name), "dit.step%02d.velocity.audio", step);
+        if (!trace_synced(dit, name, dit->audio_output_bf16, 0,
+                          dit->audio_rows, AUDIO_CHANNELS,
+                          error, error_size)) return 0;
     }
     if (submit) OP(h3_gpu_submit(dit->gpu), "submit DiT forward");
 #undef OP
@@ -2761,6 +2807,16 @@ static int denoise_euler_gpu(h3_dit *dit, float *video_latent,
                 dit->audio_output_bf16, previous_audio, (uint32_t)audio_count,
                 dit->sigmas.audio[step] - dit->sigmas.audio[step + 1],
                 audio_ratio), error, error_size, "GPU audio Euler step");
+        if (ok && h3_trace_enabled()) {
+            char name[64];
+            snprintf(name, sizeof(name), "dit.step%02d.latent.video_rows", step);
+            ok = trace_synced(dit, name, dit->video_input, video_offset,
+                              dit->video_rows, VIDEO_PATCH, error, error_size);
+            snprintf(name, sizeof(name), "dit.step%02d.latent.audio_rows", step);
+            if (ok) ok = trace_synced(dit, name, dit->audio_input, audio_offset,
+                                      dit->audio_rows, AUDIO_CHANNELS,
+                                      error, error_size);
+        }
         if (ok && (evaluate || preview)) {
             int finish = preview || step + 1 == dit->sigmas.steps ||
                          (window && pending_evaluations >= window);
@@ -2997,6 +3053,30 @@ int h3_dit_denoise_euler_preview(
                      dit->sigmas.audio[step], dit->sigmas.audio[step + 1]);
             if (!ok) fail(error, error_size,
                           "Euler solver rejected step %d", step);
+        }
+        if (ok && h3_trace_enabled()) {
+            size_t video_rows_count = (size_t)dit->video_rows * VIDEO_PATCH;
+            size_t audio_rows_count = (size_t)dit->audio_rows * AUDIO_CHANNELS;
+            float *video_rows = malloc(video_rows_count * sizeof(*video_rows));
+            float *audio_rows = malloc(audio_rows_count * sizeof(*audio_rows));
+            if (video_rows && audio_rows &&
+                h3_dit_patchify_video(video_latent, VIDEO_CHANNELS,
+                    dit->latent_t, dit->latent_h, dit->latent_w, video_rows,
+                    video_rows_count) &&
+                h3_dit_pack_audio(audio_latent, AUDIO_CHANNELS, dit->audio_t,
+                                  audio_rows, audio_rows_count)) {
+                char name[64];
+                uint64_t video_shape[] = {dit->video_rows, VIDEO_PATCH};
+                uint64_t audio_shape[] = {dit->audio_rows, AUDIO_CHANNELS};
+                snprintf(name, sizeof(name), "dit.step%02d.latent.video_rows",
+                         step);
+                (void)h3_trace_f32(name, video_rows, 2, video_shape);
+                snprintf(name, sizeof(name), "dit.step%02d.latent.audio_rows",
+                         step);
+                (void)h3_trace_f32(name, audio_rows, 2, audio_shape);
+            }
+            free(video_rows);
+            free(audio_rows);
         }
         if (ok && preview &&
             preview(step + 1, dit->sigmas.steps, video_latent, video_count,
