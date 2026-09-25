@@ -205,17 +205,48 @@ static void fail(char *error, size_t error_size, const char *format, ...) {
     va_end(arguments);
 }
 
-static unsigned command_block_interval(const h3_dit *dit) {
+/* macOS has no GPU preemption timeout: one overlong command buffer starves
+ * watchdogd and panics the host. Attention dominates at long sequences, so a
+ * buffer's cost grows with blocks * seq^2. M3 Ultra measurements: 45 blocks at
+ * seq 45256 (9.2e10) panicked; 10 at 45256 (2.0e10) and 6 at 62876 (2.4e10)
+ * completed. The default budget keeps every buffer under ~2e10. */
+#define H3_DIT_SPLIT_BUDGET_DEFAULT 2.0e10
+
+static unsigned command_block_cap(const h3_dit *dit) {
+    double budget = H3_DIT_SPLIT_BUDGET_DEFAULT;
+    const char *value = getenv("H3_DIT_SPLIT_BUDGET");
+    if (value && *value) {
+        char *end = NULL;
+        double parsed = strtod(value, &end);
+        if (end != value && !*end && parsed > 0.0) budget = parsed;
+    }
+    double sequence = (double)dit->sequence;
+    double blocks = budget / (sequence * sequence);
+    if (blocks < 1.0) return 1u;
+    return blocks >= H3_DIT_BLOCKS ? 0u : (unsigned)blocks;
+}
+
+/* Blocks per command buffer, 0 meaning unsplit. The throughput preference
+ * (explicit override, or the measured 60%-depth split) is always clamped by
+ * command_block_cap(), so no setting can submit an unbounded forward. */
+static unsigned command_block_interval(const h3_dit *dit, int prefer_unsplit) {
+    unsigned preferred;
     const char *value = getenv("H3_DIT_COMMAND_BLOCKS");
     if (value && *value) {
         char *end = NULL;
         long parsed = strtol(value, &end, 10);
-        return end != value && !*end && parsed >= 0 &&
-               parsed <= H3_DIT_BLOCKS ? (unsigned)parsed : 0;
+        preferred = end != value && !*end && parsed >= 0 &&
+                    parsed <= H3_DIT_BLOCKS ? (unsigned)parsed : 0;
+    } else if (prefer_unsplit) {
+        preferred = 0;
+    } else if (h3_gpu_is_m5(dit->gpu)) {
+        preferred = dit->active_block_count * 3 / 5;
+    } else {
+        preferred = dit->active_block_count == H3_DIT_BLOCKS ? 30u : 0u;
     }
-    if (h3_gpu_is_m5(dit->gpu))
-        return dit->active_block_count * 3 / 5;
-    return dit->active_block_count == H3_DIT_BLOCKS ? 30u : 0u;
+    unsigned cap = command_block_cap(dit);
+    if (!cap) return preferred;
+    return preferred && preferred < cap ? preferred : cap;
 }
 
 static int gpu_op(h3_dit *dit, int ok, char *error, size_t error_size,
@@ -2173,8 +2204,12 @@ static int encode_forward(h3_dit *dit, int step, int begin, int submit,
         OP(h3_gpu_copy_bf16(dit->gpu, dit->core_input, 0, dit->hidden, 0,
                             hidden_elements), "save DiT core input");
     if (evaluate_core) {
-        unsigned command_blocks = disable_command_split
-            ? 0 : command_block_interval(dit);
+        unsigned command_blocks =
+            command_block_interval(dit, disable_command_split);
+        if (getenv("H3_PROFILE") && step == 0)
+            fprintf(stderr, "h3: DiT seq %u, %u active blocks, %u per command "
+                    "buffer\n", dit->sequence, dit->active_block_count,
+                    command_blocks);
         if (dit->ssd_streaming) command_blocks = 0;
         unsigned completed_blocks = 0;
         int carried_attention_adaln = 0;
