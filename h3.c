@@ -1393,6 +1393,20 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             h3_set_error(ctx, "Qwen reference vision count mismatch");
             goto cleanup;
         }
+        for (size_t index = 0; h3_trace_enabled() && index < vision_cursor;
+             index++) {
+            char name[64];
+            uint64_t shape[] = {vision_outputs[index].tokens,
+                                H3_VISION_OUTPUT_WIDTH};
+            snprintf(name, sizeof(name), "vision.%02zu.merged", index);
+            (void)h3_trace_bf16(name, vision_outputs[index].merged, 2, shape);
+            for (unsigned stack = 0; stack < H3_VISION_DEEPSTACKS; stack++) {
+                snprintf(name, sizeof(name), "vision.%02zu.deepstack%u",
+                         index, stack);
+                (void)h3_trace_bf16(name, vision_outputs[index].deepstack[stack],
+                                    2, shape);
+            }
+        }
         h3_progress_emit(&progress, "text encoder", 0, 50);
         int text_ok = ref2va ? h3_multimodal_encode_ref2va_bf16(
                 tokenizer, text_path, "h3_shaders.metal", prompt,

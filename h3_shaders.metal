@@ -4003,6 +4003,10 @@ kernel void h3_gqa_causal_bf16(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
     float maximum = reductions[0];
+    /* Every thread must read the maximum before reductions[] is reused for
+     * the sum; without this barrier thread 0 can overwrite reductions[0]
+     * first and the softmax silently varies from run to run. */
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     float local_sum = 0.0f;
     for (uint key_row = tid; key_row < key_count; key_row += threads) {
         float probability = exp(scores[key_row] - maximum);

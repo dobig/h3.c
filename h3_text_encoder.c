@@ -1,4 +1,5 @@
 #include "h3_text_encoder.h"
+#include "h3_trace.h"
 
 #include "h3_weights.h"
 
@@ -644,6 +645,12 @@ static int text_encode_bf16_impl(
             goto cleanup;
         }
     }
+    if (h3_trace_enabled()) {
+        uint64_t shape[] = {3, tokens};
+        if (position_ids)
+            (void)h3_trace_u32("text.position_ids", position_ids, 2, shape);
+        (void)h3_trace_gpu("text.input.hidden", hidden, tokens, TEXT_HIDDEN);
+    }
 
     int prefetch_threads = text_prefetch_threads();
     int prefetch_layers = prefetch_threads > 0 && layer_count > 1;
@@ -684,6 +691,11 @@ static int text_encode_bf16_impl(
         if (!layer_ok) {
             prefetch_slots_retire(slots, prefetch_depth);
             goto cleanup;
+        }
+        if (h3_trace_enabled()) {
+            char name[64];
+            snprintf(name, sizeof(name), "text.layer%02d.hidden", layer);
+            (void)h3_trace_gpu(name, hidden, tokens, TEXT_HIDDEN);
         }
         if (progress) progress(layer + 1, TEXT_LAYERS, progress_opaque);
         if (layer + 1 >= layer_count) continue;
