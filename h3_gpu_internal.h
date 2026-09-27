@@ -96,8 +96,6 @@
 @property(nonatomic, copy) NSString *lastError;
 @property(nonatomic) h3_gpu_stats stats;
 @property(nonatomic, copy) NSString *profileLabel;
-@property(nonatomic) BOOL tensorOpsEnabled;
-@property(nonatomic) NSUInteger tensorOpsMode;
 @property(nonatomic) BOOL headMajorSDPAInputs;
 @property(nonatomic) h3_gpu_stats profileStartStats;
 @property(nonatomic) h3_gpu_stats profileMarkStats;

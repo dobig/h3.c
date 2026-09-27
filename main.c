@@ -33,18 +33,7 @@ static void usage(const char *program) {
         "      --core-reuse N     Core refresh: 1 exact, 4 fast, 6 aggressive\n"
         "      --token-reduction  Pair video tokens in middle DiT blocks\n"
         "      --ssd-streaming    Stream original BF16 DiT layers from SSD\n"
-        "      --use-int8-row-fc2 Faster one-scale int8 FC2 (M5)\n"
         "      --use-reference-rope  Disable native 256 RoPE adaptation\n"
-        "      --use-slower-bf16-mlp  Force close-reference BF16/MPS MLP\n"
-        "      --use-slower-bf16-qkv  Force close-reference BF16 QKV\n"
-        "      --use-slower-bf16-attention-output  Force BF16 attention output\n"
-        "      --use-slower-row-major-attention-output  Restore SDPA transpose\n"
-        "      --use-slower-unfused-int8-inputs  Keep standalone quantizers\n"
-        "      --use-slower-unfused-qkv-rope  Keep separate Q/K norm/RoPE\n"
-        "      --use-slower-scalar-qkv-rms  Force scalar Q/K RMS loads\n"
-        "      --use-slower-uncached-int8-scales  Reread projection scales\n"
-        "      --use-slower-dynamic-fc1-k  Use runtime-bound FC1 K loop\n"
-        "      --use-slower-grouped-quantizer  Force 256-thread FC2 quantizer\n"
         "      --seed N           Random seed (default: 42)\n"
         "      --first-frame PATH First-frame conditioning image\n"
         "      --last-frame PATH  Last-frame conditioning image\n"
@@ -55,7 +44,7 @@ static void usage(const char *program) {
         "      --ref-video-audio VIDEO AUDIO  Append video + soundtrack\n"
         "      --ref-audio PATH    Append an ordered standalone audio clip\n"
         "      --frames-dir PATH  Write generated frames as PPM files\n"
-        "      --show             Display a frame after every denoising step (M5)\n"
+        "      --show             Display a frame after every denoising step\n"
         "      --zoom N           Terminal image zoom (default: 2 for Retina)\n"
         "      --profile          Print per-phase Metal timing and allocation data\n"
         "      --info             Inspect model/device without mapping weights\n"
@@ -235,18 +224,7 @@ int main(int argc, char **argv) {
            OPT_CORE_REUSE,
            OPT_TOKEN_REDUCTION,
            OPT_SSD_STREAMING,
-           OPT_USE_INT8_ROW_FC2,
            OPT_USE_REFERENCE_ROPE,
-           OPT_USE_SLOWER_BF16_MLP,
-           OPT_USE_SLOWER_BF16_QKV,
-           OPT_USE_SLOWER_BF16_ATTENTION_OUTPUT,
-           OPT_USE_SLOWER_ROW_MAJOR_ATTENTION_OUTPUT,
-           OPT_USE_SLOWER_UNFUSED_INT8_INPUTS,
-           OPT_USE_SLOWER_UNFUSED_QKV_ROPE,
-           OPT_USE_SLOWER_SCALAR_QKV_RMS,
-           OPT_USE_SLOWER_UNCACHED_INT8_SCALES,
-           OPT_USE_SLOWER_DYNAMIC_FC1_K,
-           OPT_USE_SLOWER_GROUPED_QUANTIZER,
            OPT_SEED,
            OPT_FIRST, OPT_LAST, OPT_REF_IMAGE, OPT_REF_IMAGE_SIZE,
            OPT_REF_VIDEO, OPT_REF_SILENT_VIDEO, OPT_REF_VIDEO_AUDIO,
@@ -268,28 +246,7 @@ int main(int argc, char **argv) {
         {"core-reuse", required_argument, NULL, OPT_CORE_REUSE},
         {"token-reduction", no_argument, NULL, OPT_TOKEN_REDUCTION},
         {"ssd-streaming", no_argument, NULL, OPT_SSD_STREAMING},
-        {"use-int8-row-fc2", no_argument, NULL, OPT_USE_INT8_ROW_FC2},
         {"use-reference-rope", no_argument, NULL, OPT_USE_REFERENCE_ROPE},
-        {"use-slower-bf16-mlp", no_argument, NULL,
-         OPT_USE_SLOWER_BF16_MLP},
-        {"use-slower-bf16-qkv", no_argument, NULL,
-         OPT_USE_SLOWER_BF16_QKV},
-        {"use-slower-bf16-attention-output", no_argument, NULL,
-         OPT_USE_SLOWER_BF16_ATTENTION_OUTPUT},
-        {"use-slower-row-major-attention-output", no_argument, NULL,
-         OPT_USE_SLOWER_ROW_MAJOR_ATTENTION_OUTPUT},
-        {"use-slower-unfused-int8-inputs", no_argument, NULL,
-         OPT_USE_SLOWER_UNFUSED_INT8_INPUTS},
-        {"use-slower-unfused-qkv-rope", no_argument, NULL,
-         OPT_USE_SLOWER_UNFUSED_QKV_ROPE},
-        {"use-slower-scalar-qkv-rms", no_argument, NULL,
-         OPT_USE_SLOWER_SCALAR_QKV_RMS},
-        {"use-slower-uncached-int8-scales", no_argument, NULL,
-         OPT_USE_SLOWER_UNCACHED_INT8_SCALES},
-        {"use-slower-dynamic-fc1-k", no_argument, NULL,
-         OPT_USE_SLOWER_DYNAMIC_FC1_K},
-        {"use-slower-grouped-quantizer", no_argument, NULL,
-         OPT_USE_SLOWER_GROUPED_QUANTIZER},
         {"seed", required_argument, NULL, OPT_SEED},
         {"first-frame", required_argument, NULL, OPT_FIRST},
         {"last-frame", required_argument, NULL, OPT_LAST},
@@ -355,41 +312,8 @@ int main(int argc, char **argv) {
                 break;
             case OPT_TOKEN_REDUCTION: params.token_reduction = 1; break;
             case OPT_SSD_STREAMING: params.ssd_streaming = 1; break;
-            case OPT_USE_INT8_ROW_FC2:
-                params.use_int8_row_fc2 = 1;
-                break;
             case OPT_USE_REFERENCE_ROPE:
                 params.use_reference_rope = 1;
-                break;
-            case OPT_USE_SLOWER_BF16_MLP:
-                params.use_slower_bf16_mlp = 1;
-                break;
-            case OPT_USE_SLOWER_BF16_QKV:
-                params.use_slower_bf16_qkv = 1;
-                break;
-            case OPT_USE_SLOWER_BF16_ATTENTION_OUTPUT:
-                params.use_slower_bf16_attention_output = 1;
-                break;
-            case OPT_USE_SLOWER_ROW_MAJOR_ATTENTION_OUTPUT:
-                params.use_slower_row_major_attention_output = 1;
-                break;
-            case OPT_USE_SLOWER_UNFUSED_INT8_INPUTS:
-                params.use_slower_unfused_int8_inputs = 1;
-                break;
-            case OPT_USE_SLOWER_UNFUSED_QKV_ROPE:
-                params.use_slower_unfused_qkv_rope = 1;
-                break;
-            case OPT_USE_SLOWER_SCALAR_QKV_RMS:
-                params.use_slower_scalar_qkv_rms = 1;
-                break;
-            case OPT_USE_SLOWER_UNCACHED_INT8_SCALES:
-                params.use_slower_uncached_int8_scales = 1;
-                break;
-            case OPT_USE_SLOWER_DYNAMIC_FC1_K:
-                params.use_slower_dynamic_fc1_k = 1;
-                break;
-            case OPT_USE_SLOWER_GROUPED_QUANTIZER:
-                params.use_slower_grouped_quantizer = 1;
                 break;
             case OPT_SEED:
                 params.seed = parse_u64(optarg, "seed");

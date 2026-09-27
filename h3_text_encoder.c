@@ -133,9 +133,9 @@ static int text_prefetch_threads(void) {
     return (int)threads;
 }
 
-static int text_prefetch_depth(const h3_gpu *gpu) {
+static int text_prefetch_depth(void) {
     const char *value = getenv("H3_QWEN_PREFETCH_DEPTH");
-    if (!value || !*value) return h3_gpu_is_m5(gpu) ? 3 : 2;
+    if (!value || !*value) return 2;
     char *tail = NULL;
     long depth = strtol(value, &tail, 10);
     if (!tail || *tail || depth < 1) depth = 1;
@@ -654,7 +654,7 @@ static int text_encode_bf16_impl(
 
     int prefetch_threads = text_prefetch_threads();
     int prefetch_layers = prefetch_threads > 0 && layer_count > 1;
-    int prefetch_depth = prefetch_layers ? text_prefetch_depth(gpu) : 0;
+    int prefetch_depth = prefetch_layers ? text_prefetch_depth() : 0;
     text_prefetch_slot slots[6];
     memset(slots, 0, sizeof(slots));
     text_layer_weights weights;

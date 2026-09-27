@@ -267,38 +267,9 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
         if (source) {
             MTLCompileOptions *options = [[MTLCompileOptions alloc] init];
             options.mathMode = MTLMathModeSafe;
-            const char *nax = getenv("H3_NAX");
-            BOOL m5 = [gpu.device.name rangeOfString:@"M5"].location !=
-                      NSNotFound;
-            BOOL wantsTensorOps =
-                m5 && (!nax || !*nax || strcmp(nax, "0") != 0);
-            if (wantsTensorOps)
-                options.preprocessorMacros = @{ @"H3_METAL_HAS_TENSOR": @"1" };
             gpu.library = [gpu.device newLibraryWithSource:source
                                                    options:options
                                                      error:&libraryError];
-            gpu.tensorOpsEnabled = gpu.library && wantsTensorOps;
-            if (gpu.tensorOpsEnabled) {
-                const char *mode = nax && *nax ? nax : "qkv-attn";
-                gpu.tensorOpsMode = !strcmp(mode, "attn") ? 2u :
-                                    !strcmp(mode, "qkv-attn") ? 3u :
-                                    !strcmp(mode, "qkv") ? 4u :
-                                    !strcmp(mode, "mlp") ? 5u : 1u;
-            }
-            if (!gpu.library && wantsTensorOps) {
-                /* TensorOps is optional: an older runtime must retain the
-                 * ordinary MPSGraph/direct Metal implementation. */
-                if (getenv("H3_NAX_DIAGNOSTIC"))
-                    fprintf(stderr, "h3: TensorOps compile failed: %s\n",
-                            libraryError.localizedDescription.UTF8String);
-                options.preprocessorMacros = @{};
-                libraryError = nil;
-                gpu.library = [gpu.device newLibraryWithSource:source
-                                                       options:options
-                                                         error:&libraryError];
-                gpu.tensorOpsEnabled = NO;
-                gpu.tensorOpsMode = 0;
-            }
         }
         if (!gpu.library) {
             if (error && error_size) {
@@ -308,7 +279,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             }
             return NULL;
         }
-        NSMutableArray<NSString *> *names = [@[
+        NSArray<NSString *> *names = @[
             @"h3_linear_f32", @"h3_linear_f32_tiled",
             @"h3_linear_f32_tiled_bf16", @"h3_silu_f32",
             @"h3_linear_f32_tiled_bf16_map",
@@ -340,55 +311,7 @@ h3_gpu *h3_gpu_create(const char *shader_source_path,
             @"h3_geglu_f32", @"h3_clip_f32",
             @"h3_vae_encoder_pad_f32",
             @"h3_vae_encoder_group_norm_silu_f32"
-        ] mutableCopy];
-        if (gpu.tensorOpsEnabled) {
-            [names addObject:@"h3_linear_bf16_nax_r128"];
-            [names addObject:@"h3_linear_bf16_nax_r128_morton"];
-            [names addObject:@"h3_linear_bf16_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_bf16_nax_r128_morton4"];
-            [names addObject:@"h3_qk_rope_bf16_nax_inplace"];
-            [names addObject:@"h3_fc1_swiglu_bf16_nax_r128"];
-            [names addObject:@"h3_fc1_swiglu_bf16_nax_r128_morton"];
-            [names addObject:@"h3_fc1_swiglu_bf16_nax_r128_morton4"];
-            [names addObject:@"h3_quantize_bf16_int8_rows"];
-            [names addObject:@"h3_quantize_bf16_int8_rows_scalar"];
-            [names addObject:
-                @"h3_quantize_bf16_int8_head_major_to_rows_cached"];
-            [names addObject:@"h3_quantize_bf16_int8_groups"];
-            [names addObject:@"h3_quantize_bf16_int8_groups_scalar"];
-            [names addObject:@"h3_quantize_bf16_int8_groups_scalar128"];
-            [names addObject:
-                @"h3_quantize_bf16_int8_groups_scalar128_cached"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_nax_r128_k5376_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_local_scales_nax_r128_morton4"];
-            [names addObject:
-                @"h3_qkv_project_split_int8_rope_local_scales_nax_r128_k5376_morton4"];
-            [names addObject:@"h3_fc1_swiglu_int8_nax_r128"];
-            [names addObject:@"h3_fc1_swiglu_int8_nax_r128_k5376"];
-            [names addObject:@"h3_fc1_swiglu_int8_nax_r128_full_k5376"];
-            [names addObject:@"h3_fc1_swiglu_int8_local_nax_r128"];
-            [names addObject:@"h3_linear_int8_nax_r128"];
-            [names addObject:
-                @"h3_linear_int8_nax_r128_full_k14336"];
-            [names addObject:
-                @"h3_linear_int8_nax_r128x256_full_k14336"];
-            [names addObject:@"h3_linear_int8_local_scales_nax_r128"];
-            [names addObject:@"h3_linear_int8_local_scales_nax_r128_k7168"];
-            [names addObject:@"h3_gate_adaln_quantize_int8"];
-            [names addObject:@"h3_gate_adaln_quantize_int8_scalar"];
-            [names addObject:@"h3_linear_int8_grouped_nax_r128x64"];
-            [names addObject:
-                @"h3_linear_int8_grouped_local_nax_r128x64"];
-            [names addObject:
-                @"h3_linear_int8_grouped_local_nax_r128x128"];
-        }
+        ];
         NSMutableDictionary *pipelines = [NSMutableDictionary dictionary];
         for (NSString *name in names) {
             id<MTLFunction> function = [gpu.library newFunctionWithName:name];
@@ -435,24 +358,6 @@ void h3_gpu_free(h3_gpu *gpu) {
     }
 }
 
-int h3_gpu_is_m5(const h3_gpu *opaque) {
-    if (!opaque) return 0;
-    H3GPU *gpu = GPU((h3_gpu *)(void *)opaque);
-    return [gpu.device.name rangeOfString:@"M5"].location != NSNotFound;
-}
-
-int h3_gpu_has_nax_mlp(const h3_gpu *opaque) {
-    if (!opaque) return 0;
-    H3GPU *gpu = GPU((h3_gpu *)(void *)opaque);
-    return gpu.tensorOpsEnabled && gpu.tensorOpsMode == 5;
-}
-
-int h3_gpu_has_int8_mlp(const h3_gpu *opaque) {
-    if (!opaque) return 0;
-    H3GPU *gpu = GPU((h3_gpu *)(void *)opaque);
-    return gpu.tensorOpsEnabled;
-}
-
 static h3_gpu_tensor *h3_gpu_tensor_new(h3_gpu *opaque, const void *values,
                                         size_t elements, size_t item_size,
                                         h3_gpu_dtype dtype) {
@@ -489,10 +394,6 @@ h3_gpu_tensor *h3_gpu_tensor_new_bf16(h3_gpu *gpu, size_t elements) {
     return h3_gpu_tensor_new(gpu, NULL, elements, sizeof(uint16_t), H3_GPU_BF16);
 }
 
-h3_gpu_tensor *h3_gpu_tensor_new_i8(h3_gpu *gpu, size_t elements) {
-    return h3_gpu_tensor_new(gpu, NULL, elements, sizeof(int8_t), H3_GPU_I8);
-}
-
 h3_gpu_tensor *h3_gpu_tensor_from_f32(h3_gpu *gpu, const float *values,
                                       size_t elements) {
     return h3_gpu_tensor_new(gpu, values, elements, sizeof(float), H3_GPU_F32);
@@ -521,12 +422,9 @@ static h3_gpu_tensor *h3_gpu_tensor_load_file(h3_gpu *opaque, const char *path,
     if ((uint64_t)bytes > (uint64_t)INT64_MAX - file_offset) return NULL;
     const char *zero_copy = getenv("H3_ZERO_COPY_WEIGHTS");
     int transformer_weight = strstr(path, "/transformer/") != NULL;
-    int m5 = [gpu.device.name rangeOfString:@"M5"].location != NSNotFound;
-    int map_weight = bytes &&
-        ((zero_copy && !strcmp(zero_copy, "1")) ||
-         (transformer_weight &&
-          ((zero_copy && !strcmp(zero_copy, "transformer")) ||
-           (!zero_copy && m5))));
+    int map_weight = bytes && zero_copy &&
+        (!strcmp(zero_copy, "1") ||
+         (transformer_weight && !strcmp(zero_copy, "transformer")));
     if (map_weight) {
         int descriptor = open(path, O_RDONLY | O_CLOEXEC);
         if (descriptor < 0) {

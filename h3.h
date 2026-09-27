@@ -87,9 +87,6 @@ typedef struct {
      * preserving their full-resolution residual. Early noisy evaluations use
      * a deeper reduced interval. This is a validated aggressive speed mode. */
     int token_reduction;
-    /* Use one int8 activation scale per FC2 row and the M5 full-K kernel.
-     * Faster, but more numerically aggressive than grouped int8. */
-    int use_int8_row_fc2;
     /* Restore the released spatial RoPE grid at 256x256. The default applies
      * a visually validated half-scale grid only at that native canvas. */
     int use_reference_rope;
@@ -100,27 +97,6 @@ typedef struct {
      * canvas) or valid same-aspect dimensions no larger than width/height. */
     int render_width;
     int render_height;
-    /* Force the portable close-reference BF16/MPS MLP implementation instead
-     * of the fastest validated native MLP supported by the current GPU. */
-    int use_slower_bf16_mlp;
-    /* Force the portable close-reference BF16 QKV projection. */
-    int use_slower_bf16_qkv;
-    /* Force the portable BF16 attention-output projection. */
-    int use_slower_bf16_attention_output;
-    /* Materialize row-major BF16 after SDPA before int8 quantization. */
-    int use_slower_row_major_attention_output;
-    /* Keep int8 projection-input quantization as standalone kernels. */
-    int use_slower_unfused_int8_inputs;
-    /* Keep Q/K norm and RoPE as a separate kernel after int8 QKV. */
-    int use_slower_unfused_qkv_rope;
-    /* Force scalar BF16 loads in the fused Q/K RMS reducer. */
-    int use_slower_scalar_qkv_rms;
-    /* Reread int8 dequantization scales from device memory per output. */
-    int use_slower_uncached_int8_scales;
-    /* Use the generic runtime-bound FC1 TensorOps K loop. */
-    int use_slower_dynamic_fc1_k;
-    /* Force the original 256-thread FC2 grouped activation quantizer. */
-    int use_slower_grouped_quantizer;
     /* Decode and deliver one representative frame after every Euler step. */
     int preview_denoise;
     h3_frame_callback on_frame;
@@ -129,9 +105,11 @@ typedef struct {
 } h3_params;
 
 #define H3_PARAMS_DEFAULT { \
-    H3_DEFAULT_WIDTH, H3_DEFAULT_HEIGHT, H3_DEFAULT_FRAMES, H3_DEFAULT_STEPS, \
-    UINT64_C(42), NULL, NULL, NULL, NULL, 0, H3_REFERENCE_IMAGE_MATCH, \
-    1, H3_DEFAULT_DIT_LAYERS, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, NULL, NULL \
+    .width = H3_DEFAULT_WIDTH, .height = H3_DEFAULT_HEIGHT, \
+    .frames = H3_DEFAULT_FRAMES, .steps = H3_DEFAULT_STEPS, \
+    .seed = UINT64_C(42), \
+    .reference_image_size = H3_REFERENCE_IMAGE_MATCH, \
+    .denoise_reuse = 1, .dit_layers = H3_DEFAULT_DIT_LAYERS, .core_reuse = 1 \
 }
 
 typedef struct {
@@ -187,6 +165,12 @@ void h3_cache_get_info(const h3_ctx *ctx, h3_cache_info *info);
 h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
                        const h3_params *params);
 void h3_result_free(h3_result *result);
+
+/* ABI self-description for foreign bindings: the size of h3_params and the
+ * byte offset of each field, in declaration order. Returns the field count;
+ * writes at most capacity offsets. Bindings compare this against their own
+ * layout so a struct change fails their tests instead of corrupting calls. */
+size_t h3_params_layout(size_t *size, size_t *offsets, size_t capacity);
 
 #ifdef __cplusplus
 }

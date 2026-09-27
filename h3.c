@@ -169,23 +169,11 @@ static char *h3_prepared_key(const char *conditioning,
     if (!h3_key_append(
             &key,
             "%s|shape=%dx%dx%d|steps=%d|layers=%d|reuse-core=%d|reduce=%d"
-            "|row-fc2=%d|reference-rope=%d|ssd-streaming=%d"
-            "|slow=%d%d%d%d%d%d%d%d%d%d",
+            "|reference-rope=%d|ssd-streaming=%d",
             conditioning, render_width, render_height, params->frames,
             params->steps, params->dit_layers, params->core_reuse,
-            params->token_reduction, params->use_int8_row_fc2,
-            params->use_reference_rope,
-            params->ssd_streaming,
-            params->use_slower_bf16_mlp,
-            params->use_slower_bf16_qkv,
-            params->use_slower_bf16_attention_output,
-            params->use_slower_row_major_attention_output,
-            params->use_slower_unfused_int8_inputs,
-            params->use_slower_unfused_qkv_rope,
-            params->use_slower_scalar_qkv_rms,
-            params->use_slower_uncached_int8_scales,
-            params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer)) {
+            params->token_reduction, params->use_reference_rope,
+            params->ssd_streaming)) {
         free(key.text);
         return NULL;
     }
@@ -405,6 +393,34 @@ static int h3_inventory(h3_ctx *ctx, const char *relative,
     return ok;
 }
 
+size_t h3_params_layout(size_t *size, size_t *offsets, size_t capacity) {
+    static const size_t fields[] = {
+        offsetof(h3_params, width), offsetof(h3_params, height),
+        offsetof(h3_params, frames), offsetof(h3_params, steps),
+        offsetof(h3_params, seed), offsetof(h3_params, output_path),
+        offsetof(h3_params, first_frame), offsetof(h3_params, last_frame),
+        offsetof(h3_params, references),
+        offsetof(h3_params, reference_count),
+        offsetof(h3_params, reference_image_size),
+        offsetof(h3_params, denoise_reuse), offsetof(h3_params, dit_layers),
+        offsetof(h3_params, core_reuse),
+        offsetof(h3_params, token_reduction),
+        offsetof(h3_params, use_reference_rope),
+        offsetof(h3_params, ssd_streaming),
+        offsetof(h3_params, render_width),
+        offsetof(h3_params, render_height),
+        offsetof(h3_params, preview_denoise),
+        offsetof(h3_params, on_frame), offsetof(h3_params, on_progress),
+        offsetof(h3_params, callback_opaque)
+    };
+    size_t count = sizeof(fields) / sizeof(*fields);
+    if (size) *size = sizeof(h3_params);
+    for (size_t index = 0; offsets && index < count && index < capacity;
+         index++)
+        offsets[index] = fields[index];
+    return count;
+}
+
 h3_ctx *h3_load_dir(const char *model_dir) {
     h3_global_error[0] = '\0';
     if (!model_dir || !*model_dir) {
@@ -537,11 +553,6 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
         h3_set_error(ctx, "token reduction must be zero or one");
         return 0;
     }
-    if (params->use_int8_row_fc2 != 0 &&
-        params->use_int8_row_fc2 != 1) {
-        h3_set_error(ctx, "int8 row FC2 must be zero or one");
-        return 0;
-    }
     if (params->use_reference_rope != 0 &&
         params->use_reference_rope != 1) {
         h3_set_error(ctx, "reference RoPE must be zero or one");
@@ -549,19 +560,6 @@ static int h3_valid_params(h3_ctx *ctx, const h3_params *params) {
     }
     if (params->ssd_streaming != 0 && params->ssd_streaming != 1) {
         h3_set_error(ctx, "SSD streaming must be zero or one");
-        return 0;
-    }
-    if (params->ssd_streaming && params->use_int8_row_fc2) {
-        h3_set_error(ctx, "SSD streaming uses original BF16 weights and cannot "
-                         "be combined with int8 row FC2");
-        return 0;
-    }
-    if (params->use_int8_row_fc2 && params->use_slower_bf16_mlp) {
-        h3_set_error(ctx, "int8 row FC2 cannot be combined with the BF16 MLP");
-        return 0;
-    }
-    if (params->use_int8_row_fc2 && !h3_device(ctx)->metal4) {
-        h3_set_error(ctx, "int8 row FC2 requires an M5-class Metal 4 GPU");
         return 0;
     }
     if (params->preview_denoise != 0 && params->preview_denoise != 1) {
@@ -1512,17 +1510,6 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             params->token_reduction,
             params->ssd_streaming,
             spatial_rope_scale,
-            params->use_slower_bf16_mlp,
-            params->use_slower_bf16_qkv,
-            params->use_slower_bf16_attention_output,
-            params->use_slower_row_major_attention_output,
-            params->use_slower_unfused_int8_inputs,
-            params->use_slower_unfused_qkv_rope,
-            params->use_slower_scalar_qkv_rms,
-            params->use_slower_uncached_int8_scales,
-            params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer,
-            params->use_int8_row_fc2,
             condition_video_rows, condition_video_elements,
             condition_audio_rows, condition_audio_elements,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
@@ -1533,17 +1520,6 @@ h3_result *h3_generate(h3_ctx *ctx, const char *prompt,
             params->token_reduction,
             params->ssd_streaming,
             spatial_rope_scale,
-            params->use_slower_bf16_mlp,
-            params->use_slower_bf16_qkv,
-            params->use_slower_bf16_attention_output,
-            params->use_slower_row_major_attention_output,
-            params->use_slower_unfused_int8_inputs,
-            params->use_slower_unfused_qkv_rope,
-            params->use_slower_scalar_qkv_rms,
-            params->use_slower_uncached_int8_scales,
-            params->use_slower_dynamic_fc1_k,
-            params->use_slower_grouped_quantizer,
-            params->use_int8_row_fc2,
             h3_dit_progress_bridge, &progress, detail, sizeof(detail));
     }
     if (!dit) {

@@ -35,13 +35,9 @@ typedef struct {
 h3_gpu *h3_gpu_create(const char *shader_source_path,
                       char *error, size_t error_size);
 void h3_gpu_free(h3_gpu *gpu);
-int h3_gpu_is_m5(const h3_gpu *gpu);
-int h3_gpu_has_nax_mlp(const h3_gpu *gpu);
-int h3_gpu_has_int8_mlp(const h3_gpu *gpu);
 
 h3_gpu_tensor *h3_gpu_tensor_new_f32(h3_gpu *gpu, size_t elements);
 h3_gpu_tensor *h3_gpu_tensor_new_bf16(h3_gpu *gpu, size_t elements);
-h3_gpu_tensor *h3_gpu_tensor_new_i8(h3_gpu *gpu, size_t elements);
 h3_gpu_tensor *h3_gpu_tensor_from_f32(h3_gpu *gpu, const float *values,
                                       size_t elements);
 h3_gpu_tensor *h3_gpu_tensor_from_bf16(h3_gpu *gpu, const uint16_t *values,
@@ -299,58 +295,6 @@ int h3_gpu_mlp_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                     const h3_gpu_tensor *fc2_weight, uint32_t rows,
                     uint32_t input_dim, uint32_t hidden_dim,
                     uint32_t output_dim);
-/* Experimental M5 Metal 4 paired FC1/SwiGLU plus direct FC2 path. Available
- * only when the context was created with H3_NAX=mlp. */
-int h3_gpu_mlp_nax_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
-                        h3_gpu_tensor *activated,
-                        const h3_gpu_tensor *input,
-                        const h3_gpu_tensor *fc1_weight,
-                        const h3_gpu_tensor *fc2_weight, uint32_t rows,
-                        uint32_t input_dim, uint32_t hidden_dim,
-                        uint32_t output_dim);
-/* Experimental M5 Metal 4 int8 MLP. Weights use one F32 scale per output
- * channel; activations are quantized dynamically with one F32 scale per row. */
-int h3_gpu_quantize_weight_int8(h3_gpu *gpu, h3_gpu_tensor *output,
-                                h3_gpu_tensor *scales,
-                                const h3_gpu_tensor *input, uint32_t rows,
-                                uint32_t columns);
-int h3_gpu_linear_int8_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
-                            h3_gpu_tensor *quantized_input,
-                            h3_gpu_tensor *input_scales,
-                            const h3_gpu_tensor *input,
-                            const h3_gpu_tensor *weight,
-                            const h3_gpu_tensor *weight_scales,
-                            uint32_t rows, uint32_t input_dim,
-                            uint32_t output_dim,
-                            int use_slower_uncached_int8_scales);
-/* Consume SDPA's native [head,row,dimension] BF16 layout without a full
- * BF16 transpose, gathering directly into the projection's row-major int8. */
-int h3_gpu_linear_int8_head_major_bf16(
-                            h3_gpu *gpu, h3_gpu_tensor *output,
-                            h3_gpu_tensor *quantized_input,
-                            h3_gpu_tensor *input_scales,
-                            const h3_gpu_tensor *input,
-                            const h3_gpu_tensor *weight,
-                            const h3_gpu_tensor *weight_scales,
-                            uint32_t rows, uint32_t heads,
-                            uint32_t head_dim, uint32_t output_dim);
-int h3_gpu_mlp_int8_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
-                         h3_gpu_tensor *activated,
-                         h3_gpu_tensor *quantized_activation,
-                         h3_gpu_tensor *activation_scales,
-                         const h3_gpu_tensor *input,
-                         const h3_gpu_tensor *fc1_weight,
-                         const h3_gpu_tensor *fc1_scales,
-                         const h3_gpu_tensor *fc2_weight,
-                         const h3_gpu_tensor *fc2_scales,
-                         const h3_gpu_tensor *fc1_bf16,
-                         const h3_gpu_tensor *fc2_bf16, uint32_t rows,
-                         uint32_t input_dim, uint32_t hidden_dim,
-                         uint32_t output_dim,
-                         int use_slower_grouped_quantizer,
-                         int use_slower_dynamic_fc1_k,
-                         int use_int8_row_fc2,
-                         int input_is_quantized);
 int h3_gpu_silu_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                      const h3_gpu_tensor *input, uint32_t elements);
 int h3_gpu_rms_norm_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
@@ -417,19 +361,6 @@ int h3_gpu_gate_adaln_bf16(
                      uint32_t width, uint32_t slots, uint32_t gate_slot,
                      uint32_t shift_slot, uint32_t scale_slot,
                      float epsilon);
-int h3_gpu_gate_adaln_quantize_int8(
-                     h3_gpu *gpu, h3_gpu_tensor *gated_residual,
-                     h3_gpu_tensor *quantized_output,
-                     h3_gpu_tensor *quantized_scales,
-                     const h3_gpu_tensor *residual,
-                     const h3_gpu_tensor *branch,
-                     const h3_gpu_tensor *norm_weight,
-                     const h3_gpu_tensor *gate_modulation,
-                     const h3_gpu_tensor *norm_modulation,
-                     const h3_gpu_tensor *row_map, uint32_t rows,
-                     uint32_t padded_rows, uint32_t width, uint32_t slots,
-                     uint32_t gate_slot, uint32_t shift_slot,
-                     uint32_t scale_slot, float epsilon);
 int h3_gpu_qkv_rope_bf16(h3_gpu *gpu, h3_gpu_tensor *query,
                          h3_gpu_tensor *key, h3_gpu_tensor *value,
                          const h3_gpu_tensor *qkv,
@@ -451,9 +382,7 @@ int h3_gpu_grouped_qkv_rope_bf16(h3_gpu *gpu, h3_gpu_tensor *query,
                                  uint32_t sequence, uint32_t heads,
                                  uint32_t head_dim, uint32_t rope_half,
                                  float epsilon);
-/* Project grouped H3 QKV and apply its exact Q/K norm/RoPE boundary. Metal 4
- * may route projections directly into the attention layout; other devices
- * retain the ordinary two calls. */
+/* Project grouped H3 QKV, then apply its exact Q/K norm/RoPE boundary. */
 int h3_gpu_grouped_qkv_linear_rope_bf16(
                                  h3_gpu *gpu,
                                  h3_gpu_tensor *query,
@@ -469,27 +398,6 @@ int h3_gpu_grouped_qkv_linear_rope_bf16(
                                  uint32_t rows, uint32_t input_dim,
                                  uint32_t heads, uint32_t head_dim,
                                  uint32_t rope_half, float epsilon);
-int h3_gpu_grouped_qkv_linear_rope_int8(
-                                 h3_gpu *gpu,
-                                 h3_gpu_tensor *query,
-                                 h3_gpu_tensor *key,
-                                 h3_gpu_tensor *value,
-                                 h3_gpu_tensor *quantized_input,
-                                 h3_gpu_tensor *input_scales,
-                                 const h3_gpu_tensor *input,
-                                 const h3_gpu_tensor *weight,
-                                 const h3_gpu_tensor *weight_scales,
-                                 const h3_gpu_tensor *q_norm,
-                                 const h3_gpu_tensor *k_norm,
-                                 const h3_gpu_tensor *rope_cos,
-                                 const h3_gpu_tensor *rope_sin,
-                                 uint32_t rows, uint32_t input_dim,
-                                 uint32_t heads, uint32_t head_dim,
-                                 uint32_t rope_half, float epsilon,
-                                 int input_is_quantized,
-                                 int use_slower_unfused_qkv_rope,
-                                 int use_slower_scalar_qkv_rms,
-                                 int use_slower_uncached_int8_scales);
 int h3_gpu_sdpa_bf16(h3_gpu *gpu, h3_gpu_tensor *output,
                      const h3_gpu_tensor *query, const h3_gpu_tensor *key,
                      const h3_gpu_tensor *value, uint32_t sequence,

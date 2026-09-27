@@ -70,8 +70,20 @@ static void test_temporal_and_canvas(void) {
 
 static void test_schedule(void) {
     h3_params defaults = H3_PARAMS_DEFAULT;
+    CHECK(defaults.width == H3_DEFAULT_WIDTH);
+    CHECK(defaults.height == H3_DEFAULT_HEIGHT);
+    CHECK(defaults.frames == H3_DEFAULT_FRAMES);
     CHECK(defaults.steps == 20);
+    CHECK(defaults.seed == 42);
+    CHECK(defaults.reference_image_size == H3_REFERENCE_IMAGE_MATCH);
+    CHECK(defaults.denoise_reuse == 1);
+    CHECK(defaults.dit_layers == H3_DEFAULT_DIT_LAYERS);
+    CHECK(defaults.core_reuse == 1);
     CHECK(defaults.use_reference_rope == 0);
+    CHECK(defaults.ssd_streaming == 0);
+    CHECK(defaults.render_width == 0 && defaults.render_height == 0);
+    CHECK(!defaults.output_path && !defaults.references &&
+          !defaults.on_frame && !defaults.callback_opaque);
 
     h3_sigma_schedule schedule;
     CHECK(h3_schedule_build(20, &schedule));

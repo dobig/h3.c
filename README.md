@@ -153,9 +153,8 @@ their full peaks to it; the OS, media buffers, and output resolution still need
 headroom. `--show` keeps a preview VAE resident and adds roughly 10 GiB, so omit
 it for the lowest-memory run.
 
-SSD streaming is an explicit memory/speed tradeoff and is not the default. It
-cannot be combined with `--use-int8-row-fc2`. In an interactive session, use
-`!ssd-streaming on`.
+SSD streaming is an explicit memory/speed tradeoff and is not the default. In an
+interactive session, use `!ssd-streaming on`.
 
 ### 3. Move toward reference quality
 
@@ -192,13 +191,6 @@ These controls are independent unless noted otherwise:
 | Core residual reuse | `--core-reuse 1` | `--core-reuse 4` | `--core-reuse 6` | Refreshes patch/head work every step but runs the expensive core less often. |
 | Token reduction | off | optional | `--token-reduction` | Pairs horizontal video tokens inside middle blocks; faster but may change composition. |
 | Internal canvas | output size | `384x384` for 512 square output | `320x320` | Runs DiT/VAE smaller, then upscales with vImage. |
-
-On M5, `--use-int8-row-fc2` uses one activation scale per FC2 row and a single
-full-width TensorOps product. It is optional because it is less numerically
-conservative than grouped int8. It reduced complete denoiser forwards by about
-2.6% in reciprocal tests. Matched four-step fox and surfer videos kept the same
-subjects, setting, and motion (full-video SSIM 0.919 and 0.828). In the
-interactive session, use `!int8-row-fc2 on`.
 
 `--reuse` and `--core-reuse` are mutually exclusive. Layer thinning can be
 combined with either one.
@@ -532,15 +524,13 @@ tile plan for close-reference diagnosis.
 
 ### Weight residency and streamed prompt encoding
 
-On M5-class GPUs, persistent transformer weights are mapped directly from their
-safetensor shards instead of copied into anonymous shared buffers. This keeps
-the 37 GiB model file-backed/reclaimable and slightly improves total transformer
-time; M3 uses the faster copied-buffer path. `H3_ZERO_COPY_WEIGHTS=0` disables
-the M5 selection for diagnostics.
+Persistent transformer weights are copied into anonymous shared buffers, which
+measured faster on M3. `H3_ZERO_COPY_WEIGHTS=transformer` instead maps them
+directly from their safetensor shards (file-backed and reclaimable), and
+`H3_ZERO_COPY_WEIGHTS=1` maps every loaded weight that way.
 The streamed Qwen text encoder preallocates a small ring of future layer
 buffers and fills them on eight I/O workers while Metal executes the current
-layer. The default ring depth is two layers on M3/older hardware and three on
-M5, where the target machine has 128 GiB. `H3_QWEN_PREFETCH=0` restores the
+layer. The default ring depth is two layers. `H3_QWEN_PREFETCH=0` restores the
 single-layer synchronous reference path; values 1-8 select the worker count,
 and `H3_QWEN_PREFETCH_DEPTH=1` through `6` overrides the ring depth.
 
@@ -553,36 +543,6 @@ The first active block is prefetched again during the final block, so a cached
 interactive DiT is ready for its next denoiser evaluation. Measurements reached
 about 13--14.6 GiB/s from the internal SSD. `H3_PROFILE=1` reports total bytes,
 read throughput, and the part of the read wait that was not hidden by GPU work.
-
-### Metal 4 and TensorOps paths
-
-M5 GPUs automatically use native BF16 Metal 4/TensorOps for the DiT QKV and
-attention-output projections at sequence lengths up to 2,048. The compact
-Morton schedule routes Q/K/V directly into head-major attention inputs, avoids
-three MPSGraph input transposes, and is byte-identical to the portable path. It
-improves a complete 512x512 50-block forward by about 2% across repeated IT/US
-M5 Max runs. For 2,049-3,072 rows, including 864x480, two row-offset Morton
-dispatches preserve the efficient tile geometry and improve the complete
-forward by about 2% in balanced runs. Still larger sequences stay on MPSGraph.
-`H3_NAX=0` disables TensorOps for exact A/B diagnosis. The selection is guarded
-at runtime and falls back to the unchanged portable library if compilation is
-unavailable.
-
-`H3_NAX=1` forces the broader native BF16 linear path. It passes the complete
-50-block MLX fixture, but remains opt-in: exact-shape microbenchmarks favor its
-128-row tile while full DiT runs currently favor MPSGraph scheduling. This
-keeps a working NAX integration available for later quantized/fused kernels
-without making a benchmark regression the default.
-`H3_NAX=mlp` selects a more specialized Metal 4 path: paired FC1 gate/up
-TensorOps tiles apply SwiGLU in threadgroup memory and write only the
-14,336-wide activated intermediate, then FC2 also stays on TensorOps.
-`H3_DISABLE_NAX_MLP=1` keeps the MPSGraph MLP in a context created this way for
-same-process A/B testing. The path is deliberately opt-in because scheduling
-depends on the OS GPU stack: the primary macOS 26.5.2 M5 Max gained 1.3-2.0%
-in isolated real-weight MLP runs but lost about 1-3% in a complete 50-block forward,
-while an otherwise identical macOS 26.5 M5 Max gained 1.4% in a same-context
-forward A/B. The resulting 50-block velocities were close (1.9% video and 2.4%
-audio relative L2), but not byte-identical.
 
 ### Specialized projection kernels
 
@@ -616,12 +576,15 @@ staging buffers and packing blits.
 ### Scheduling and activation memory
 
 The DiT core is split into two ordered Metal command buffers so GPU execution
-of the first part overlaps CPU encoding of the second. Thermal-balanced ABBA
-measurements select a 60%-depth split on M5 (30/50, 27/45, and 24/40), with
-roughly 0.5-1.8% wins; M3 automatically splits only the validated 30/50 case,
-which measured 1.2% faster, because 24/40 regressed there. The operation order
-and generated bytes are unchanged. `H3_DIT_COMMAND_BLOCKS=0` restores one
-command buffer; values 1-50 override the split for further tuning.
+of the first part overlaps CPU encoding of the second. The measured default
+splits only the full 50-block core at block 30 (1.2% faster on M3; 24/40
+regressed there). Independently, every command buffer is capped by a
+`blocks * sequence^2` work budget (`H3_DIT_SPLIT_BUDGET`, default `2e10`):
+macOS has no GPU preemption, so one overlong buffer starves `watchdogd` and
+panics the host, which happened on M3 Ultra at 768x768 with 260+ frames. No
+setting can lift the cap. The operation order and generated bytes are
+unchanged. `H3_DIT_COMMAND_BLOCKS=0` asks for one command buffer (still subject
+to the cap); values 1-50 override the preferred split.
 DiT activation buffers also follow their actual intra-block lifetimes: the QKV
 projection arena is reused first for attention heads and then for the normalized
 MLP input, while the current attention-output arena becomes the MLP output after
@@ -635,20 +598,17 @@ ABBA gains were 1.6% on M3 Max and 0.4-1.1% on M5 Max. Activation wrappers stay
 transient because retaining them regressed the M5. The outputs remain
 byte-identical, and `H3_DISABLE_GRAPH_DATA_CACHE=1` restores transient wrappers
 for all tensors.
-On M3/older hardware, the four MPSGraph segments in each DiT block also reuse
-one `MPSCommandBuffer` wrapper for their shared underlying Metal command buffer.
-Repeated thermal-balanced runs measured 1.0-1.6% faster on M3 Max; M5 measured
-neutral, so it retains fresh wrappers. `H3_REUSE_MPS_COMMAND=0` or `1` overrides
-the automatic selection. Results are byte-identical.
-On M5, the serving Euler sampler keeps its patch-packed F32 latents and cached
-BF16 velocities in Metal buffers. Each selected denoiser refresh is completed
+The four MPSGraph segments in each DiT block also reuse one `MPSCommandBuffer`
+wrapper for their shared underlying Metal command buffer; repeated
+thermal-balanced runs measured 1.0-1.6% faster on M3 Max.
+`H3_REUSE_MPS_COMMAND=0` restores fresh wrappers. Results are byte-identical.
+`H3_GPU_SAMPLER=1` keeps the serving Euler sampler's patch-packed F32 latents
+and cached BF16 velocities in Metal buffers. Each selected denoiser refresh is completed
 before the next is encoded, avoiding MPSGraph back-pressure while removing all
 intermediate latent/velocity readbacks and repacking. Two warm eight-run A/B
 sequences measured small 0.1% and 0.3% gains with byte-identical final latents;
 the path also saves roughly 16 bytes of transient host state per video-latent
-element (about 136 MB at the 768p shape). M3 and older GPUs retain the CPU
-sampler by default. `H3_CPU_SAMPLER=1` restores it on M5;
-`H3_GPU_SAMPLER=1` selects the GPU-state path explicitly, and
+element (about 136 MB at the 768p shape). The CPU sampler remains the default;
 `H3_GPU_SAMPLER_WINDOW=0` enables the slower unbounded encode-ahead diagnostic.
 
 ### Checkpoint layout and media pipeline
@@ -701,110 +661,6 @@ The DiT fast path evaluates each BF16 `fc1 -> SwiGLU -> fc2` block as one cached
 graph, avoiding separate graph boundaries and persistent intermediate tensors.
 Set `H3_DISABLE_FUSED_MLP=1` to retain the close-reference operation boundaries
 for numerical diagnosis.
-
-On supported M5 Metal 4 TensorOps hardware, the native int8 MLP engine is the
-default. It dynamically quantizes activations, uses per-output-channel weight
-scales, and gives the sensitive FC2 input one scale per 1,024 channels.
-The selected FC2 kernel keeps scaled partial products in private cooperative
-fragments instead of repeatedly spilling a 32 KiB threadgroup tile. A fixed
-50-layer, 19-transition 512x512 render measured 36.30 seconds with BF16 MPS and
-25.80 seconds with int8 on M5 Max. Beginning, middle, and final decoded frames
-retained the same subject, composition, and motion; small edge and fur details
-can differ. The current diagnostic implementation retains both BF16 and int8
-MLP weights only when an A/B diagnostic requests them. Normal int8 loading
-releases each block's BF16 FC1/FC2 buffers after their submitted quantization
-finishes, reducing measured peak tensor storage to 25.9 GiB from the BF16
-path's 36.4 GiB. Runtime weight quantization still adds startup time.
-
-The fastest M5 path also quantizes each DiT QKV projection and writes its
-Q/K/V tiles directly in head-major attention layout before the existing Q/K
-normalization and RoPE kernel. In a fixed 50-layer, 19-transition 512x512
-render this reduced denoising again, from 25.80 to 19.32 seconds. Sampled
-beginning, middle, and final frames remained a coherent detailed fox walking
-through snow; quantized attention can change framing and fine detail. Use
-`--use-slower-bf16-qkv` for the close-reference BF16 projection. Normal int8
-loading releases the redundant BF16 QKV weights after quantization.
-
-The following attention-output projection is int8 as well on the default M5
-path. Crossed same-model tests improve a complete forward by another 4.5-5.5%
-at 512 and 864. A decoded fox render remained clean and closely matched the
-int8-QKV-only composition; its thermally hot denoise measured 19.18 seconds.
-Use `--use-slower-bf16-attention-output` to retain that projection in BF16.
-
-On that int8 path, SDPA now leaves its result in native
-`[head,row,dimension]` order. A specialized 256-thread kernel gathers and
-quantizes each H3 row directly into the projection's row-major int8 buffer,
-eliminating the intervening full-width BF16 transpose without changing any
-output byte. Thermally controlled crossed runs improve complete 512 and 864
-forwards by roughly 0.2-1.2%. Use
-`--use-slower-row-major-attention-output` to restore the explicit BF16
-row-major SDPA output and ordinary quantizer.
-
-The M5 path also folds QKV and MLP activation quantization into the preceding
-gated AdaLN kernel. This removes 99 standalone quantizer dispatches per
-50-layer forward while preserving the previous output bytes, improving crossed
-512/864 measurements by about 0.3-0.6%. Use
-`--use-slower-unfused-int8-inputs` to restore the standalone quantizers.
-
-The fused gated-AdaLN path loads its full 5,376-wide H3 rows as BF16x4 vectors
-and writes int8x4. It stages the rounded values locally before computing the
-original per-thread RMS sequence, so the reduction tree and every output byte
-remain unchanged. Crossed measurements save roughly another 0.1-0.5%. The
-existing `--use-slower-unfused-int8-inputs` option retains the portable scalar
-and standalone-quantizer fallback.
-
-Q/K RMS normalization and RoPE are performed inside the int8 QKV projection
-tile as well. The fused epilogue is byte-identical and improves complete
-forwards by 2.1-3.2% at 512 and 1.0-1.8% at 864 in crossed M5 measurements.
-Use `--use-slower-unfused-qkv-rope` to restore the separate Q/K kernel.
-
-That epilogue processes four adjacent Q/K dimensions per work item with
-BF16x4 loads and stores. The per-element arithmetic and BF16 rounding order are
-unchanged, while crossed cool-state measurements improve complete forwards by
-about 0.4-1.0% at both 512 and 864. The same
-`--use-slower-unfused-qkv-rope` option restores the scalar standalone path.
-
-At up to 2,048 rows, the exact RMS loop uses BF16x4 loads followed by four
-explicit ordered FMAs. This preserves every output bit and improves 512-class
-forwards by another 0.5-0.6%; larger shapes retain scalar loads because the two
-forms tie there. Use `--use-slower-scalar-qkv-rms` to force scalar loads.
-
-The int8 attention-output projection caches its 128 row and column scales in
-1 KiB of threadgroup memory instead of rereading them for every cooperative
-fragment element. Above 2,048 rows the fused QKV kernel uses the same idea and
-then recycles that storage for inverse RMS values; smaller QKV shapes retain
-direct loads because the two forms tie there. Both are byte-identical and
-improve complete forwards by about 0.2-0.7% where selected. Use
-`--use-slower-uncached-int8-scales` to restore direct device-scale loads.
-
-For sequences of at most 2,048 rows, the H3 attention-output projection also
-compiles its 7,168-by-5,376 shape into the TensorOps kernel. The result remains
-byte-identical while saving about 0.2-0.8% in crossed complete 512-forward
-measurements. Larger sequences retain the dynamic-shape kernel because the
-specialization regresses there. `--use-slower-uncached-int8-scales` restores
-the general dynamic, direct-scale-load implementation.
-
-FC1 also uses an H3-specialized, compile-time 5,376-wide TensorOps loop. It is
-byte-identical to the generic loop and saves about 0.1-0.4% in crossed complete
-forwards. Use `--use-slower-dynamic-fc1-k` to restore the runtime-bound loop.
-
-```sh
-./h3 --profile -d ./MiniMax-H3 \
-  -p "A red fox walks through fresh snow." \
-  --width 512 --height 512 --frames 22 --steps 20 \
-  --layers 50 --reuse 1 -o outputs/fox-int8.mp4
-```
-
-Use `--use-slower-bf16-mlp` to force the portable close-reference MPS/BF16 MLP
-path for numerical comparison. Older Metal hardware selects that path
-automatically when the required native TensorOps kernels are unavailable.
-For FC2 activation quantization, sequences of at most 2,048 rows use an exact
-128-thread reduction. Each thread retains its eight BF16 input values while
-computing the group maximum, avoiding a second device-memory read when it emits
-the int8 values; crossed M5 measurements improved complete 512 forwards by
-about 0.2-0.8% without changing any output byte. Larger sequences retain the
-measured 256-thread kernel. `--use-slower-grouped-quantizer` forces the latter
-at every size for A/B comparison.
 
 The native baseline targets the original `FL2VA/` and `Ref2VA/` checkpoint
 trees. Model phases are loaded and released separately so the 33B transformer,
